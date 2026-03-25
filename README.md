@@ -27,7 +27,7 @@ bazi-skill 是一个面向 Agent 的八字技能包，目标很明确：
 
 ## 核心能力
 
-- 支持公历与农历输入，农历支持闰月
+- 默认按日常使用的公历年月日时分输入，也支持用户明确指定农历，农历支持闰月
 - 自动根据出生地经度做真太阳时校正
 - 输出完整四柱、十神、藏干、刑冲合会、大运与当年流年信息
 - 支持命盘本地存档、读取、列出与删除
@@ -66,6 +66,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+如果你在安装或运行时遇到 `AttributeError: _ARRAY_API not found`，基本是 NumPy 2.x 和底层二进制依赖的兼容问题。当前仓库已经把 NumPy 固定在 `2` 以下；重新执行一次 `pip install -r requirements.txt` 即可。
+
 如果你偏好 conda，也可以自行创建环境后执行同样的安装步骤。
 
 默认安装路径就是：`~/.claude/skills/bazi-skill`
@@ -90,8 +92,8 @@ bazi-skill/
 Agent 读取 SKILL.md 后，会按规则执行完整流程：
 
 1. 收集出生信息
-2. 补齐历法、时分、出生地、闰月等关键参数
-3. 调用 calculate_bazi.py 生成结构化命盘 JSON
+2. 默认按平常使用的日期时间收集，并补齐时分、出生地；仅用户明确说是农历时再确认闰月等参数
+3. 调用 calculate_bazi.py 生成命盘结果
 4. 按约定话术完成首次解读
 5. 在适当时机调用 store_bazi.py 做存档与复用
 
@@ -104,7 +106,18 @@ Agent 读取 SKILL.md 后，会按规则执行完整流程：
 ```bash
 SKILL_DIR="$HOME/.claude/skills/bazi-skill"
 PYTHON="$SKILL_DIR/.venv/bin/python"
-"$PYTHON" "$SKILL_DIR/calculate_bazi.py" '{"calendar_type":"gregorian","year":2001,"month":7,"day":6,"hour":16,"minute":43,"gender":"F","birth_place":"上海"}'
+"$PYTHON" "$SKILL_DIR/calculate_bazi.py" --pretty '{"year":2000,"month":8,"day":1,"hour":16,"minute":54,"gender":"F","birth_place":"上海"}'
+```
+
+这个模式会在终端里按区块展示四柱、十神、藏干、刑冲合会、起运信息和大运列表，并用五行配色强化木火土金水的识别。
+
+保存命盘时，如果直接把完整 JSON 放进 `--data` 参数里，可能因为命令行转义或内容过长导致解析失败。更稳的方式是通过 stdin 或文件传给 [store_bazi.py](store_bazi.py)：
+
+```bash
+SKILL_DIR="$HOME/.claude/skills/bazi-skill"
+PYTHON="$SKILL_DIR/.venv/bin/python"
+"$PYTHON" "$SKILL_DIR/calculate_bazi.py" --json '{"year":2000,"month":8,"day":1,"hour":16,"minute":54,"gender":"F","birth_place":"上海"}' | \
+"$PYTHON" "$SKILL_DIR/store_bazi.py" save --name "张三" --slug "zhangsan"
 ```
 
 这样 Agent 不管当前停在什么目录，调用都会稳定得多。
@@ -131,7 +144,7 @@ PYTHON="$SKILL_DIR/.venv/bin/python"
 - 早晚子时：23:00-23:59 日柱算当天，使用 sect=2
 - 真太阳时：按出生地经度自动校正，偏差为 $(经度 - 120°) \times 4$ 分钟
 - 大运：男阳女阴顺排，男阴女阳逆排
-- 支持公历与农历输入，农历支持闰月
+- 默认按日常公历输入；只有用户明确说明农历时，才切换到农历并处理闰月
 
 ## 适合的使用场景
 

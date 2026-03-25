@@ -7,7 +7,9 @@ store_bazi.py
 
 用法（CLI）:
   # 保存
-  python store_bazi.py save --name "张三" --slug "zhangsan" --data '<json>'
+    python store_bazi.py save --name "张三" --slug "zhangsan" --data '<json>'
+    python calculate_bazi.py --json '<json>' | python store_bazi.py save --name "张三" --slug "zhangsan"
+    python store_bazi.py save --name "张三" --slug "zhangsan" --data-file chart.json
 
   # 读取
   python store_bazi.py load --slug "zhangsan"
@@ -35,6 +37,34 @@ def _ensure_dir():
 
 def _path(slug: str) -> Path:
     return STORE_DIR / f"{slug}.json"
+
+
+def _load_json_payload(raw: str) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 解析失败: {exc.msg} (line {exc.lineno}, column {exc.colno})") from exc
+
+
+def _read_save_data(args) -> dict:
+    if args.data_file:
+        with open(args.data_file, encoding="utf-8") as f:
+            return _load_json_payload(f.read())
+
+    if args.data:
+        if args.data == "-":
+            return _load_json_payload(sys.stdin.read())
+        if args.data.startswith("@"):
+            with open(args.data[1:], encoding="utf-8") as f:
+                return _load_json_payload(f.read())
+        return _load_json_payload(args.data)
+
+    if not sys.stdin.isatty():
+        stdin_payload = sys.stdin.read().strip()
+        if stdin_payload:
+            return _load_json_payload(stdin_payload)
+
+    raise ValueError("保存命盘时必须提供 JSON 数据：使用 --data、--data-file，或通过 stdin 传入")
 
 
 def save(name: str, slug: str, data: dict, memo: str = "") -> dict:
@@ -108,7 +138,8 @@ if __name__ == "__main__":
     p_save = sub.add_parser("save")
     p_save.add_argument("--name", required=True)
     p_save.add_argument("--slug", required=True)
-    p_save.add_argument("--data", required=True, help="calculate_bazi 输出的 JSON 字符串")
+    p_save.add_argument("--data", help="JSON 字符串；传 - 表示从 stdin 读取，传 @path 表示从文件读取")
+    p_save.add_argument("--data-file", help="从文件读取 JSON")
     p_save.add_argument("--memo", default="", help="备注（关系、用途等）")
 
     # load
@@ -125,7 +156,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.cmd == "save":
-        data = json.loads(args.data)
+        try:
+            data = _read_save_data(args)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
         result = save(args.name, args.slug, data, args.memo)
     elif args.cmd == "load":
         result = load(args.slug)

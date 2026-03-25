@@ -3,7 +3,7 @@ calculate_bazi.py
 八字排盘核心计算模块
 
 输入: JSON (via stdin 或直接调用 calculate())
-输出: 结构化 JSON 命盘数据
+输出: CLI 默认使用终端友好展示；结构化数据供内部复用
 
 流派约定:
   - 早晚子时: sect=2，23:00-23:59 日柱算当天
@@ -11,8 +11,11 @@ calculate_bazi.py
   - 真太阳时: 基于出生地经度校正
 """
 
+import argparse
 import json
+import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -75,6 +78,15 @@ SHI_ER_ZHANG_SHENG_NAMES = ["长生", "沐浴", "冠带", "临官", "帝旺", "�
 SHI_SHEN_TABLE = {
     # 格式: (日主阴阳, 目标五行关系, 目标阴阳) → 十神
     # 关系: 同我/生我/我生/克我/我克
+}
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+WUXING_COLOR = {
+    "木": "1;32",
+    "火": "1;31",
+    "土": "1;33",
+    "金": "1;36",
+    "水": "1;94",
 }
 
 def get_shi_shen(ri_gan: str, target_gan: str) -> str:
@@ -359,6 +371,202 @@ def build_pillar(gan: str, zhi: str, ri_gan: Optional[str] = None, is_day_pillar
     }
 
 
+def text_width(text: str) -> int:
+    """估算终端显示宽度，兼容中文对齐。"""
+    width = 0
+    for char in ANSI_RE.sub("", str(text)):
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def pad_text(text: str, width: int) -> str:
+    text = str(text)
+    return text + " " * max(0, width - text_width(text))
+
+
+def style(text: str, code: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def style_wuxing(text: str, wuxing: str, enabled: bool) -> str:
+    return style(text, WUXING_COLOR.get(wuxing, "0"), enabled)
+
+
+def format_gan(gan: str, enabled: bool) -> str:
+    return style_wuxing(gan, WUXING_GAN[gan], enabled)
+
+
+def format_zhi(zhi: str, enabled: bool) -> str:
+    return style_wuxing(zhi, WUXING_ZHI[zhi], enabled)
+
+
+def format_gan_zhi(gan: str, zhi: str, enabled: bool) -> str:
+    return f"{format_gan(gan, enabled)}{format_zhi(zhi, enabled)}"
+
+
+def format_wuxing_label(wuxing: str, yinyang: str, enabled: bool) -> str:
+    return f"{style_wuxing(wuxing, wuxing, enabled)}{yinyang}"
+
+
+def render_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [text_width(header) for header in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], text_width(cell))
+
+    header_line = " | ".join(pad_text(header, widths[i]) for i, header in enumerate(headers))
+    separator = "-+-".join("-" * widths[i] for i in range(len(headers)))
+    body = [" | ".join(pad_text(cell, widths[i]) for i, cell in enumerate(row)) for row in rows]
+    return "\n".join([header_line, separator, *body])
+
+
+def summarize_cang_gan(cang_gan: dict, color_enabled: bool = False) -> str:
+    items = []
+    for key in ("zhu_qi", "zhong_qi", "yu_qi"):
+        entry = cang_gan.get(key)
+        if not entry:
+            continue
+        gan_text = format_gan(entry["value"], color_enabled)
+        shi_shen = entry.get("shi_shen")
+        if shi_shen:
+            items.append(f"{gan_text}({shi_shen})")
+        else:
+            items.append(gan_text)
+    return "/".join(items) if items else "-"
+
+
+def summarize_relations(xchh: dict) -> str:
+    labels = {
+        "he": "合",
+        "chong": "冲",
+        "xing": "刑",
+        "hui": "会",
+    }
+    parts = []
+    for key in ("he", "chong", "xing", "hui"):
+        items = xchh.get(key, [])
+        if items:
+            parts.append(f"{labels[key]}: " + "；".join(item["detail"] for item in items))
+    return "\n".join(parts) if parts else "未见显著合冲刑会"
+
+
+def render_pillar_block(name: str, pillar: dict, color_enabled: bool) -> str:
+    tian_gan = pillar["tian_gan"]
+    di_zhi = pillar["di_zhi"]
+    shi_shen = tian_gan.get("shi_shen") or "日主"
+    cang_gan = summarize_cang_gan(di_zhi["cang_gan"], color_enabled)
+    gan_zhi = format_gan_zhi(tian_gan["value"], di_zhi["value"], color_enabled)
+    tian_gan_text = format_gan(tian_gan["value"], color_enabled)
+    di_zhi_text = format_zhi(di_zhi["value"], color_enabled)
+    return "\n".join([
+        f"{name}: {gan_zhi}",
+        f"  天干: {tian_gan_text}  {shi_shen}  {format_wuxing_label(tian_gan['wuxing'], tian_gan['yinyang'], color_enabled)}",
+        f"  地支: {di_zhi_text}  {format_wuxing_label(di_zhi['wuxing'], di_zhi['yinyang'], color_enabled)}",
+        f"  藏干: {cang_gan}",
+        f"  长生: {pillar['shi_er_zhang_sheng']}",
+    ])
+
+
+def render_pretty_chart(chart: dict, use_color: bool = True) -> str:
+    color_enabled = use_color and sys.stdout.isatty()
+    confirmed = chart["input_confirmed"]
+    original_chart = chart["original_chart"]
+    life_cycle = chart["life_cycle"]
+    current_year = chart["system_context"]["current_year"]
+    current_liu_nian = chart["system_context"]["current_liu_nian"]
+    pillar_order = [
+        ("年柱", original_chart["year_pillar"]),
+        ("月柱", original_chart["month_pillar"]),
+        ("日柱", original_chart["day_pillar"]),
+        ("时柱", original_chart["hour_pillar"]),
+    ]
+
+    pillar_blocks = [render_pillar_block(name, pillar, color_enabled) for name, pillar in pillar_order]
+
+    da_yun_rows = []
+    for index, item in enumerate(life_cycle["da_yun_list"]):
+        marker = "*" if index == life_cycle["current_da_yun_index"] else " "
+        gan_zhi = item["gan_zhi"]
+        da_yun_rows.append([
+            style(marker, "1;35", color_enabled) if marker == "*" else marker,
+            str(item["step"]),
+            format_gan_zhi(gan_zhi[0], gan_zhi[1], color_enabled),
+            item["tian_gan_shi_shen"],
+            "/".join(item["di_zhi_shi_shen"]) if item["di_zhi_shi_shen"] else "-",
+            f"{item['start_age']}-{item['end_age']}岁",
+            f"{item['start_year']}-{item['end_year']}",
+        ])
+
+    title = style("=== 八字命盘 ===", "1;36", color_enabled)
+    subtitle = style(
+        f"{confirmed['solar_datetime_original']}  {confirmed['birth_place']}  {'男' if confirmed['gender'] == 'M' else '女'}",
+        "2;37",
+        color_enabled,
+    )
+    corrected = (
+        f"真太阳时: {confirmed['solar_datetime_corrected']}"
+        f"  经纬度: {confirmed['coordinates']['lat']}, {confirmed['coordinates']['lon']}"
+        f"  历法: {'农历' if confirmed['calendar_type'] == 'lunar' else '公历'}"
+    )
+    ri_gan = original_chart["ri_zhu_tian_gan"]
+    day_master = style(
+        f"日主: {format_gan(ri_gan, color_enabled)}({format_wuxing_label(original_chart['ri_zhu_wuxing'], original_chart['ri_zhu_yinyang'], color_enabled)})",
+        "1;33",
+        color_enabled,
+    )
+    liu_nian_gz = current_liu_nian["gan_zhi"]
+    liu_nian = (
+        f"当前流年: {current_year} {format_gan_zhi(liu_nian_gz[0], liu_nian_gz[1], color_enabled)}"
+        f"  天干十神: {current_liu_nian['tian_gan_shi_shen']}"
+        f"  地支十神: {'/'.join(current_liu_nian['di_zhi_shi_shen']) if current_liu_nian['di_zhi_shi_shen'] else '-'}"
+    )
+    qi_yun = f"起运: {life_cycle['qi_yun_age']}岁 ({life_cycle['qi_yun_date']})"
+
+    lines = [
+        title,
+        subtitle,
+        corrected,
+        day_master,
+        "",
+        style("[四柱总览]", "1;34", color_enabled),
+        "\n\n".join(pillar_blocks),
+        "",
+        style("[刑冲合会]", "1;34", color_enabled),
+        summarize_relations(original_chart["xing_chong_he_hui"]),
+        "",
+        style("[大运]", "1;34", color_enabled),
+        f"说明: 标记 * 的为当前大运。{qi_yun}",
+        render_table([" ", "步", "干支", "天干十神", "地支十神", "年龄", "年份"], da_yun_rows),
+        "",
+        style("[当下]", "1;34", color_enabled),
+        liu_nian,
+    ]
+    return "\n".join(lines)
+
+
+def parse_cli_args(argv: list[str]) -> tuple[dict, str]:
+    parser = argparse.ArgumentParser(description="八字排盘计算")
+    parser.add_argument("payload", nargs="?", help="JSON 参数")
+    parser.add_argument("--pretty", action="store_true", help="以终端友好的格式展示命盘")
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    if not args.pretty and not args.json:
+        parser.error("必须显式指定输出形式；终端展示请使用 --pretty")
+
+    if args.pretty and args.json:
+        parser.error("--pretty 和 --json 不能同时使用")
+
+    if args.payload:
+        params = json.loads(args.payload)
+    else:
+        params = json.load(sys.stdin)
+
+    return params, "pretty" if args.pretty else "json"
+
+
 # ─────────────────────────────────────────────
 # 主函数
 # ─────────────────────────────────────────────
@@ -504,10 +712,10 @@ def calculate(
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        params = json.loads(sys.argv[1])
-    else:
-        params = json.load(sys.stdin)
-
+    params, output_mode = parse_cli_args(sys.argv[1:])
+    params.setdefault("calendar_type", "gregorian")
     result = calculate(**params)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if output_mode == "pretty":
+        print(render_pretty_chart(result))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
