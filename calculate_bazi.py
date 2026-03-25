@@ -728,18 +728,22 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, str, str]:
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    if not args.pretty and not args.json:
-        parser.error("必须显式指定输出形式；终端展示请使用 --pretty")
-
     if args.pretty and args.json:
         parser.error("--pretty 和 --json 不能同时使用")
+
+    if args.pretty:
+        output_mode = "pretty"
+    elif args.json:
+        output_mode = "json"
+    else:
+        output_mode = "pretty" if args.payload else "json"
 
     if args.payload:
         params = json.loads(args.payload)
     else:
         params = json.load(sys.stdin)
 
-    return params, "pretty" if args.pretty else "json", args.color
+    return params, output_mode, args.color
 
 
 # ─────────────────────────────────────────────
