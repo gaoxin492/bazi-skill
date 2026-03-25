@@ -303,9 +303,9 @@ def calc_xing_chong_he_hui(pillars: dict) -> dict:
 # 流年计算
 # ─────────────────────────────────────────────
 
-def get_liu_nian(year: int, ri_gan: str) -> dict:
-    """获取指定年份的流年干支及十神"""
-    solar = Solar.fromYmd(year, 1, 1)
+def get_liu_nian(ref_dt: datetime, ri_gan: str) -> dict:
+    """按指定日期获取当下流年干支及十神。"""
+    solar = Solar.fromYmd(ref_dt.year, ref_dt.month, ref_dt.day)
     lunar = solar.getLunar()
     gz = lunar.getYearInGanZhiExact()
     gan = gz[0]
@@ -314,7 +314,7 @@ def get_liu_nian(year: int, ri_gan: str) -> dict:
     dz_cang = CANG_GAN.get(zhi, [])
     dz_ss_list = [get_shi_shen(ri_gan, g) for g, _ in dz_cang if g in WUXING_GAN]
     return {
-        "year": year,
+        "year": ref_dt.year,
         "gan_zhi": gz,
         "tian_gan": gan,
         "di_zhi": zhi,
@@ -637,7 +637,8 @@ def calculate(
     
     # 获取大运列表
     da_yun_list = []
-    current_year_ad = datetime.now().year
+    current_dt = datetime.now()
+    current_year_ad = current_dt.year
     current_da_yun_index = 0
 
     for i, dy in enumerate(yun.getDaYun()):
@@ -671,12 +672,12 @@ def calculate(
             current_da_yun_index = len(da_yun_list) - 1
 
     # 9. 流年
-    liu_nian = get_liu_nian(current_year_ad, ri_gan)
+    liu_nian = get_liu_nian(current_dt, ri_gan)
 
     # 10. 组装输出
     return {
         "system_context": {
-            "current_date": datetime.now().strftime("%Y-%m-%d"),
+            "current_date": current_dt.strftime("%Y-%m-%d"),
             "current_year": current_year_ad,
             "current_liu_nian": liu_nian
         },
