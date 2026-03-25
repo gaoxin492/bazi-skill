@@ -13,6 +13,7 @@ calculate_bazi.py
 
 import argparse
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -315,6 +316,8 @@ def get_liu_nian(ref_dt: datetime, ri_gan: str) -> dict:
     dz_ss_list = [get_shi_shen(ri_gan, g) for g, _ in dz_cang if g in WUXING_GAN]
     return {
         "year": ref_dt.year,
+        "reference_date": ref_dt.strftime("%Y-%m-%d"),
+        "boundary_rule": "流年以立春为界；公历年初若未过立春，仍按上一年干支计。",
         "gan_zhi": gz,
         "tian_gan": gan,
         "di_zhi": zhi,
@@ -388,6 +391,18 @@ def style(text: str, code: str, enabled: bool) -> str:
     if not enabled:
         return text
     return f"\033[{code}m{text}\033[0m"
+
+
+def should_use_color(color_mode: str) -> bool:
+    if color_mode == "always":
+        return True
+    if color_mode == "never":
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("CLICOLOR_FORCE") == "1":
+        return True
+    return sys.stdout.isatty()
 
 
 def style_wuxing(text: str, wuxing: str, enabled: bool) -> str:
@@ -469,8 +484,8 @@ def render_pillar_block(name: str, pillar: dict, color_enabled: bool) -> str:
     ])
 
 
-def render_pretty_chart(chart: dict, use_color: bool = True) -> str:
-    color_enabled = use_color and sys.stdout.isatty()
+def render_pretty_chart(chart: dict, color_mode: str = "auto") -> str:
+    color_enabled = should_use_color(color_mode)
     confirmed = chart["input_confirmed"]
     original_chart = chart["original_chart"]
     life_cycle = chart["life_cycle"]
@@ -522,11 +537,14 @@ def render_pretty_chart(chart: dict, use_color: bool = True) -> str:
         f"  天干十神: {current_liu_nian['tian_gan_shi_shen']}"
         f"  地支十神: {'/'.join(current_liu_nian['di_zhi_shi_shen']) if current_liu_nian['di_zhi_shi_shen'] else '-'}"
     )
+    liu_nian_rule = current_liu_nian["boundary_rule"]
     qi_yun = f"起运: {life_cycle['qi_yun_age']}岁 ({life_cycle['qi_yun_date']})"
+    display_hint = "显示模式: ANSI 彩色" if color_enabled else "显示模式: 纯文本（当前环境不支持或未启用 ANSI 颜色）"
 
     lines = [
         title,
         subtitle,
+        display_hint,
         corrected,
         day_master,
         "",
@@ -542,14 +560,16 @@ def render_pretty_chart(chart: dict, use_color: bool = True) -> str:
         "",
         style("[当下]", "1;34", color_enabled),
         liu_nian,
+        liu_nian_rule,
     ]
     return "\n".join(lines)
 
 
-def parse_cli_args(argv: list[str]) -> tuple[dict, str]:
+def parse_cli_args(argv: list[str]) -> tuple[dict, str, str]:
     parser = argparse.ArgumentParser(description="八字排盘计算")
     parser.add_argument("payload", nargs="?", help="JSON 参数")
     parser.add_argument("--pretty", action="store_true", help="以终端友好的格式展示命盘")
+    parser.add_argument("--color", choices=["auto", "always", "never"], default="auto", help="pretty 模式下的颜色策略")
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -564,7 +584,7 @@ def parse_cli_args(argv: list[str]) -> tuple[dict, str]:
     else:
         params = json.load(sys.stdin)
 
-    return params, "pretty" if args.pretty else "json"
+    return params, "pretty" if args.pretty else "json", args.color
 
 
 # ─────────────────────────────────────────────
@@ -713,10 +733,10 @@ def calculate(
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    params, output_mode = parse_cli_args(sys.argv[1:])
+    params, output_mode, color_mode = parse_cli_args(sys.argv[1:])
     params.setdefault("calendar_type", "gregorian")
     result = calculate(**params)
     if output_mode == "pretty":
-        print(render_pretty_chart(result))
+        print(render_pretty_chart(result, color_mode=color_mode))
     else:
         print(json.dumps(result, ensure_ascii=False, indent=2))
