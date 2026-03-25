@@ -1,6 +1,6 @@
-![bazi-skill](./icon.png)
-
 # bazi-skill
+
+![bazi-skill](./icon-readme.png)
 
 把八字排盘、命盘存档与对话式解读，打包成一个真正能落地的 Agent Skill。
 
