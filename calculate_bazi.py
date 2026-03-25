@@ -147,19 +147,11 @@ def get_shi_er_chang_sheng(tian_gan: str, di_zhi: str) -> str:
 # 真太阳时校正
 # ─────────────────────────────────────────────
 
-def get_coordinates(birth_place: str) -> tuple[float, float]:
-    """城市名 → (纬度, 经度)"""
+def resolve_birth_place(birth_place: str, birth_dt: Optional[datetime] = None) -> dict:
+    """解析出生地，返回经纬度、时区和解析来源。"""
     geolocator = Nominatim(user_agent="bazi_skill", timeout=10)
-    try:
-        location = geolocator.geocode(birth_place + ", China", language="zh")
-        if not location:
-            location = geolocator.geocode(birth_place, language="zh")
-        if location:
-            return location.latitude, location.longitude
-    except Exception:
-        pass
-    # 常用城市经度备用表
-    CITY_LON = {
+    timezone_finder = TimezoneFinder()
+    fallback_locations = {
         "北京": (39.9, 116.4), "上海": (31.2, 121.5), "广州": (23.1, 113.3),
         "深圳": (22.5, 114.1), "成都": (30.7, 104.1), "杭州": (30.3, 120.2),
         "武汉": (30.6, 114.3), "西安": (34.3, 108.9), "南京": (32.1, 118.8),
@@ -168,19 +160,85 @@ def get_coordinates(birth_place: str) -> tuple[float, float]:
         "郑州": (34.7, 113.6), "昆明": (25.0, 102.7), "福州": (26.1, 119.3),
         "合肥": (31.8, 117.3), "南昌": (28.7, 115.9),
     }
-    for key, coords in CITY_LON.items():
-        if key in birth_place:
-            return coords
-    # 默认北京
-    return (39.9, 116.4)
 
-def correct_solar_time(dt: datetime, longitude: float) -> datetime:
+    queries = [birth_place.strip()]
+    if re.search(r"[\u4e00-\u9fff]", birth_place) and "中国" not in birth_place and "China" not in birth_place:
+        queries.append(f"{birth_place}, China")
+
+    location = None
+    for query in queries:
+        for language in ("zh", None):
+            try:
+                location = geolocator.geocode(query, language=language)
+            except Exception:
+                location = None
+            if location:
+                break
+        if location:
+            break
+
+    source = "geocoder"
+    resolved_name = birth_place
+    if location:
+        latitude = float(location.latitude)
+        longitude = float(location.longitude)
+        resolved_name = getattr(location, "address", birth_place) or birth_place
+    else:
+        matched = None
+        for key, coords in fallback_locations.items():
+            if key in birth_place:
+                matched = (key, coords)
+                break
+        if matched:
+            resolved_name = matched[0]
+            latitude, longitude = matched[1]
+            source = "builtin-fallback"
+        else:
+            raise ValueError(
+                f"无法解析出生地：{birth_place}。请提供更完整的地点名称（如 城市, 国家/地区），"
+                "或直接提供可识别的标准地名。"
+            )
+
+    timezone_name = timezone_finder.timezone_at(lng=longitude, lat=latitude)
+    if not timezone_name:
+        timezone_name = timezone_finder.closest_timezone_at(lng=longitude, lat=latitude)
+    if not timezone_name:
+        timezone_name = "Asia/Shanghai"
+
+    timezone_obj = pytz.timezone(timezone_name)
+    if birth_dt is None:
+        offset_minutes = int(datetime.now(timezone_obj).utcoffset().total_seconds() // 60)
+    else:
+        try:
+            localized_dt = timezone_obj.localize(birth_dt, is_dst=None)
+        except Exception:
+            localized_dt = timezone_obj.localize(birth_dt, is_dst=False)
+        offset_minutes = int(localized_dt.utcoffset().total_seconds() // 60)
+
+    standard_longitude = offset_minutes / 4.0
+    return {
+        "lat": latitude,
+        "lon": longitude,
+        "timezone": timezone_name,
+        "standard_longitude": standard_longitude,
+        "resolved_name": resolved_name,
+        "source": source,
+    }
+
+
+def get_coordinates(birth_place: str, birth_dt: Optional[datetime] = None) -> tuple[float, float]:
+    """兼容旧接口：城市名 → (纬度, 经度)。"""
+    location_info = resolve_birth_place(birth_place, birth_dt)
+    return location_info["lat"], location_info["lon"]
+
+
+def correct_solar_time(dt: datetime, longitude: float, standard_longitude: float = 120.0) -> datetime:
     """
     真太阳时校正
-    中国标准时间基准经度: 120°E
+    基准经度按出生地所在时区推导，默认回落到 120°E。
     每偏差1°经度 = 4分钟
     """
-    delta_minutes = (longitude - 120.0) * 4
+    delta_minutes = (longitude - standard_longitude) * 4
     return dt + timedelta(minutes=delta_minutes)
 
 
@@ -193,10 +251,25 @@ def calc_xing_chong_he_hui(pillars: dict) -> dict:
     计算四柱间的刑冲合会
     pillars: {"year": (天干, 地支), "month": ..., "day": ..., "hour": ...}
     """
-    result = {"he": [], "chong": [], "xing": [], "hui": []}
+    result = {"he": [], "chong": [], "xing": [], "hui": [], "hai": [], "po": []}
     pillar_names = ["year", "month", "day", "hour"]
     zhi_list = [pillars[p][1] for p in pillar_names]
     gan_list = [pillars[p][0] for p in pillar_names]
+
+    def get_dist(i, j):
+        d = abs(i - j)
+        return "相邻" if d == 1 else ("隔位" if d == 2 else "遥位")
+
+    def build_positions(targets: tuple[str, ...], hits: list[int]) -> list[int]:
+        positions = []
+        used = set()
+        for target in targets:
+            for idx in hits:
+                if idx not in used and zhi_list[idx] == target:
+                    positions.append(idx)
+                    used.add(idx)
+                    break
+        return positions
 
     # 天干合
     TIAN_GAN_HE = [("甲", "己", "土"), ("乙", "庚", "金"), ("丙", "辛", "水"),
@@ -209,8 +282,19 @@ def calc_xing_chong_he_hui(pillars: dict) -> dict:
                     result["he"].append({
                         "type": "天干合", "element": wx,
                         "pillars": [pillar_names[i], pillar_names[j]],
-                        "detail": f"{gan_list[i]}{gan_list[j]}合{wx}"
+                        "detail": f"{gan_list[i]}{gan_list[j]}合{wx}({get_dist(i, j)})"
                     })
+
+    # 天干冲
+    TIAN_GAN_CHONG = [{"甲", "庚"}, {"乙", "辛"}, {"丙", "壬"}, {"丁", "癸"}]
+    for i in range(4):
+        for j in range(i+1, 4):
+            if {gan_list[i], gan_list[j]} in TIAN_GAN_CHONG:
+                result["chong"].append({
+                    "type": "天干冲",
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{gan_list[i]}{gan_list[j]}相冲({get_dist(i, j)})"
+                })
 
     # 地支六合
     ZHI_LIU_HE = [("子", "丑", "土"), ("寅", "亥", "木"), ("卯", "戌", "火"),
@@ -223,68 +307,135 @@ def calc_xing_chong_he_hui(pillars: dict) -> dict:
                     result["he"].append({
                         "type": "地支六合", "element": wx,
                         "pillars": [pillar_names[i], pillar_names[j]],
-                        "detail": f"{zhi_list[i]}{zhi_list[j]}合{wx}"
+                        "detail": f"{zhi_list[i]}{zhi_list[j]}合{wx}({get_dist(i, j)})"
                     })
 
-    # 地支三合
+    # 地支三合 / 半合 / 拱局
     SAN_HE = [("申", "子", "辰", "水"), ("亥", "卯", "未", "木"),
               ("寅", "午", "戌", "火"), ("巳", "酉", "丑", "金")]
     for z1, z2, z3, wx in SAN_HE:
         hits = [i for i, z in enumerate(zhi_list) if z in (z1, z2, z3)]
-        if len(hits) >= 2:
+        chars_set = set(zhi_list[h] for h in hits)
+        if len(chars_set) == 3:
+            idxs = sorted(build_positions((z1, z2, z3), hits))
             result["hui"].append({
-                "type": "三合", "element": wx,
-                "pillars": [pillar_names[h] for h in hits],
-                "detail": f"{''.join(zhi_list[h] for h in hits)}{'局' if len(hits)==3 else '半合'}{wx}"
+                "type": "三合局", "element": wx,
+                "pillars": [pillar_names[idx] for idx in idxs],
+                "detail": f"{z1}{z2}{z3}三合{wx}局"
             })
-
-    # 地支半合（已包含在三合逻辑中，len==2 情况）
+        elif len(chars_set) == 2:
+            # 区分半合与拱局，需两两检查以防出现两个相同地支
+            for i_idx in range(len(hits)):
+                for j_idx in range(i_idx+1, len(hits)):
+                    p1, p2 = hits[i_idx], hits[j_idx]
+                    c1, c2 = zhi_list[p1], zhi_list[p2]
+                    if c1 != c2: # 确保不是重复字，如两个"未"
+                        dist = get_dist(p1, p2)
+                        if z2 in (c1, c2):
+                            result["hui"].append({
+                                "type": "半合", "element": wx,
+                                "pillars": [pillar_names[p1], pillar_names[p2]],
+                                "detail": f"{c1}{c2}半合{wx}({dist})"
+                            })
+                        else:
+                            result["hui"].append({
+                                "type": "拱局", "element": wx,
+                                "pillars": [pillar_names[p1], pillar_names[p2]],
+                                "detail": f"{c1}{c2}拱合{wx}({dist})"
+                            })
 
     # 地支三会
     SAN_HUI = [("寅", "卯", "辰", "木"), ("巳", "午", "未", "火"),
                ("申", "酉", "戌", "金"), ("亥", "子", "丑", "水")]
     for z1, z2, z3, wx in SAN_HUI:
         if all(z in zhi_list for z in (z1, z2, z3)):
-            idxs = [zhi_list.index(z) for z in (z1, z2, z3)]
+            hits = [i for i, z in enumerate(zhi_list) if z in (z1, z2, z3)]
+            idxs = sorted(build_positions((z1, z2, z3), hits))
             result["hui"].append({
-                "type": "三会", "element": wx,
+                "type": "三会局", "element": wx,
                 "pillars": [pillar_names[i] for i in idxs],
                 "detail": f"{z1}{z2}{z3}三会{wx}局"
             })
 
     # 地支相冲
-    CHONG_PAIRS = [("子", "午"), ("丑", "未"), ("寅", "申"),
-                   ("卯", "酉"), ("辰", "戌"), ("巳", "亥")]
+    CHONG_PAIRS = [{"子", "午"}, {"丑", "未"}, {"寅", "申"},
+                   {"卯", "酉"}, {"辰", "戌"}, {"巳", "亥"}]
     for i in range(4):
         for j in range(i+1, 4):
-            for z1, z2 in CHONG_PAIRS:
-                if (zhi_list[i] == z1 and zhi_list[j] == z2) or \
-                   (zhi_list[i] == z2 and zhi_list[j] == z1):
-                    result["chong"].append({
-                        "type": "相冲",
-                        "pillars": [pillar_names[i], pillar_names[j]],
-                        "detail": f"{zhi_list[i]}{zhi_list[j]}相冲"
-                    })
+            if {zhi_list[i], zhi_list[j]} in CHONG_PAIRS:
+                result["chong"].append({
+                    "type": "地支冲",
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{zhi_list[i]}{zhi_list[j]}相冲({get_dist(i, j)})"
+                })
 
-    # 地支相刑（三刑 + 自刑）
+    # 地支相刑（无礼/无恩/恃势/自刑）
+    XING_PAIRS = {
+        frozenset(("子", "卯")): "无礼之刑",
+        frozenset(("寅", "巳")): "无恩之刑",
+        frozenset(("巳", "申")): "无恩之刑",
+        frozenset(("寅", "申")): "无恩之刑",
+        frozenset(("丑", "未")): "恃势之刑",
+        frozenset(("未", "戌")): "恃势之刑",
+        frozenset(("丑", "戌")): "恃势之刑",
+    }
+    for i in range(4):
+        for j in range(i+1, 4):
+            xing_type = XING_PAIRS.get(frozenset((zhi_list[i], zhi_list[j])))
+            if xing_type:
+                result["xing"].append({
+                    "type": xing_type,
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{zhi_list[i]}{zhi_list[j]}相刑({get_dist(i, j)})"
+                })
+
+    # 三刑全局
     SAN_XING = [("寅", "巳", "申"), ("丑", "戌", "未")]
     for group in SAN_XING:
         hits = [i for i, z in enumerate(zhi_list) if z in group]
-        if len(hits) >= 2:
+        chars_set = set(zhi_list[h] for h in hits)
+        if len(chars_set) == 3:
+            idxs = sorted(build_positions(group, hits))
             result["xing"].append({
-                "type": "三刑",
-                "pillars": [pillar_names[h] for h in hits],
-                "detail": f"{''.join(zhi_list[h] for h in hits)}相刑"
+                "type": "三刑全",
+                "pillars": [pillar_names[i] for i in idxs],
+                "detail": f"{''.join(group)}三刑全"
             })
+
+    # 自刑: 辰辰/午午/酉酉/亥亥
     ZI_XING = ["辰", "午", "酉", "亥"]
-    for z in ZI_XING:
-        idxs = [i for i, zz in enumerate(zhi_list) if zz == z]
-        if len(idxs) >= 2:
-            result["xing"].append({
-                "type": "自刑",
-                "pillars": [pillar_names[i] for i in idxs[:2]],
-                "detail": f"{z}{z}自刑"
-            })
+    for i in range(4):
+        for j in range(i+1, 4):
+            if zhi_list[i] == zhi_list[j] and zhi_list[i] in ZI_XING:
+                result["xing"].append({
+                    "type": "自刑",
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{zhi_list[i]}{zhi_list[j]}自刑({get_dist(i, j)})"
+                })
+
+    # 地支相害
+    HAI_PAIRS = [{"子", "未"}, {"丑", "午"}, {"寅", "巳"},
+                 {"卯", "辰"}, {"申", "亥"}, {"酉", "戌"}]
+    for i in range(4):
+        for j in range(i+1, 4):
+            if {zhi_list[i], zhi_list[j]} in HAI_PAIRS:
+                result["hai"].append({
+                    "type": "地支害",
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{zhi_list[i]}{zhi_list[j]}相害({get_dist(i, j)})"
+                })
+
+    # 地支相破
+    PO_PAIRS = [{"子", "酉"}, {"丑", "辰"}, {"寅", "亥"},
+                {"卯", "午"}, {"巳", "申"}, {"未", "戌"}]
+    for i in range(4):
+        for j in range(i+1, 4):
+            if {zhi_list[i], zhi_list[j]} in PO_PAIRS:
+                result["po"].append({
+                    "type": "地支破",
+                    "pillars": [pillar_names[i], pillar_names[j]],
+                    "detail": f"{zhi_list[i]}{zhi_list[j]}相破({get_dist(i, j)})"
+                })
 
     # 去重
     for key in result:
@@ -458,9 +609,11 @@ def summarize_relations(xchh: dict) -> str:
         "chong": "冲",
         "xing": "刑",
         "hui": "会",
+        "hai": "害",
+        "po": "破",
     }
     parts = []
-    for key in ("he", "chong", "xing", "hui"):
+    for key in ("he", "chong", "xing", "hui", "hai", "po"):
         items = xchh.get(key, [])
         if items:
             parts.append(f"{labels[key]}: " + "；".join(item["detail"] for item in items))
@@ -523,6 +676,8 @@ def render_pretty_chart(chart: dict, color_mode: str = "auto") -> str:
     corrected = (
         f"真太阳时: {confirmed['solar_datetime_corrected']}"
         f"  经纬度: {confirmed['coordinates']['lat']}, {confirmed['coordinates']['lon']}"
+        f"  时区: {confirmed['timezone']}"
+        f"  解析: {confirmed['birth_place_resolved']} ({confirmed['location_source']})"
         f"  历法: {'农历' if confirmed['calendar_type'] == 'lunar' else '公历'}"
     )
     ri_gan = original_chart["ri_zhu_tian_gan"]
@@ -551,7 +706,7 @@ def render_pretty_chart(chart: dict, color_mode: str = "auto") -> str:
         style("[四柱总览]", "1;34", color_enabled),
         "\n\n".join(pillar_blocks),
         "",
-        style("[刑冲合会]", "1;34", color_enabled),
+        style("[刑冲合会害破]", "1;34", color_enabled),
         summarize_relations(original_chart["xing_chong_he_hui"]),
         "",
         style("[大运]", "1;34", color_enabled),
@@ -603,14 +758,16 @@ def calculate(
     is_leap_month: bool = False
 ) -> dict:
 
-    # 1. 获取出生地经纬度
-    lat, lon = get_coordinates(birth_place)
-
-    # 2. 构建本地时间 datetime（假设东8区标准时）
+    # 1. 构建出生地本地时间
     local_dt = datetime(year, month, day, hour, minute)
 
+    # 2. 获取出生地经纬度与时区
+    location_info = resolve_birth_place(birth_place, local_dt)
+    lat = location_info["lat"]
+    lon = location_info["lon"]
+
     # 3. 真太阳时校正
-    corrected_dt = correct_solar_time(local_dt, lon)
+    corrected_dt = correct_solar_time(local_dt, lon, location_info["standard_longitude"])
 
     # 4. 转换为 Solar 对象
     if calendar_type == "lunar":
@@ -705,7 +862,10 @@ def calculate(
             "solar_datetime_original": local_dt.strftime("%Y-%m-%d %H:%M"),
             "solar_datetime_corrected": corrected_dt.strftime("%Y-%m-%d %H:%M"),
             "birth_place": birth_place,
+            "birth_place_resolved": location_info["resolved_name"],
             "coordinates": {"lat": round(lat, 4), "lon": round(lon, 4)},
+            "timezone": location_info["timezone"],
+            "location_source": location_info["source"],
             "gender": gender,
             "calendar_type": calendar_type
         },
