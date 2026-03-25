@@ -502,10 +502,10 @@ def render_pretty_chart(chart: dict, color_mode: str = "auto") -> str:
 
     da_yun_rows = []
     for index, item in enumerate(life_cycle["da_yun_list"]):
-        marker = "*" if index == life_cycle["current_da_yun_index"] else " "
+        marker = "=>" if index == life_cycle["current_da_yun_index"] else "  "
         gan_zhi = item["gan_zhi"]
         da_yun_rows.append([
-            style(marker, "1;35", color_enabled) if marker == "*" else marker,
+            style(marker, "1;35", color_enabled) if marker == "=>" else marker,
             str(item["step"]),
             format_gan_zhi(gan_zhi[0], gan_zhi[1], color_enabled),
             item["tian_gan_shi_shen"],
@@ -555,8 +555,8 @@ def render_pretty_chart(chart: dict, color_mode: str = "auto") -> str:
         summarize_relations(original_chart["xing_chong_he_hui"]),
         "",
         style("[大运]", "1;34", color_enabled),
-        f"说明: 标记 * 的为当前大运。{qi_yun}",
-        render_table([" ", "步", "干支", "天干十神", "地支十神", "年龄", "年份"], da_yun_rows),
+        f"说明: 标记 => 的为当前大运。{qi_yun}",
+        render_table(["  ", "步", "干支", "天干十神", "地支十神", "年龄", "年份"], da_yun_rows),
         "",
         style("[当下]", "1;34", color_enabled),
         liu_nian,
